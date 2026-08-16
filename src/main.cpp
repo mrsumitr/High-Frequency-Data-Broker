@@ -1,6 +1,8 @@
 #include <cstdio>
+#include <unistd.h>
 #include "memory_pool.hpp"
 #include "worker_pool.hpp"
+#include "tcp_listener.hpp"
 #include <thread>
 constexpr std::size_t POOL_CAPACITY = 10000;
 int main() {
@@ -19,6 +21,17 @@ int main() {
 
     }// destructor joins all threads here
     std::printf("All workers joined cleanly. \n");
+
+    TcpListener listener(9000);
+    int client_fd = listener.accept_connectivity();
+
+    char buf[256];
+    ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        std::printf("Received %zd bytes: %s\n", n, buf);
+    }
+    close(client_fd);
 
     // sanity check: claim slot 0, write into it, mark it ready then free it.
     SensorReading& r=pool.slot(0);
