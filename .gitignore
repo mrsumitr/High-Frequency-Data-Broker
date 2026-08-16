@@ -1,0 +1,16 @@
+# Build output
+broker
+src/main
+*.o
+*.out
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
