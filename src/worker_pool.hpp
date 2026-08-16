@@ -42,9 +42,6 @@ private:
             std::size_t slot_index;
             if (ring_.try_claim(slot_index)) {
                 SensorReading& r = pool_.slot(slot_index);
-                std::printf("Worker %zu claimed slot %zu (timestamp=%llu, num_samples=%u)\n",
-                            worker_id, slot_index,
-                            static_cast<unsigned long long>(r.timestamp_ns), r.num_samples);
 
                 // Smoothed output lives on this thread's own stack -- each
                 // worker has its own local buffer, so no data race even
@@ -52,11 +49,23 @@ private:
                 float smoothed[MAX_VOLTAGE_SAMPLES];
                 moving_average(r.voltages, smoothed, r.num_samples, MOVING_AVERAGE_WINDOW);
 
-                std::printf("Worker %zu smoothed voltages: [", worker_id);
-                for (uint32_t i = 0; i < r.num_samples; ++i) {
-                    std::printf("%.3f%s", smoothed[i], i + 1 < r.num_samples ? ", " : "");
+                // Build the whole log line in a thread-local buffer and
+                // emit it with a single printf() call. printf() calls are
+                // individually atomic w.r.t. other threads, but a "line"
+                // built from several printf() calls is not -- other
+                // workers' output can interleave in between them. Multiple
+                // threads sharing stdout is itself shared mutable state.
+                char line[256];
+                int off = std::snprintf(line, sizeof(line),
+                    "Worker %zu claimed slot %zu (timestamp=%llu, num_samples=%u) smoothed=[",
+                    worker_id, slot_index, static_cast<unsigned long long>(r.timestamp_ns),
+                    r.num_samples);
+                for (uint32_t i = 0; i < r.num_samples && off < static_cast<int>(sizeof(line)); ++i) {
+                    off += std::snprintf(line + off, sizeof(line) - off, "%.3f%s", smoothed[i],
+                                          i + 1 < r.num_samples ? ", " : "");
                 }
-                std::printf("]\n");
+                std::snprintf(line + off, sizeof(line) - off, "]\n");
+                std::printf("%s", line);
 
                 pool_.state(slot_index).store(SlotState::Free, std::memory_order_release);
             }

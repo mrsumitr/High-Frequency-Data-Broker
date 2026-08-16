@@ -19,8 +19,15 @@ class RingBuffer{
   // called by the listener thread only.
   void publish(std::size_t pool_slot_index){
     std::size_t pos=write_index_.load(std::memory_order_relaxed);
+    // Backpressure: entries_[pos & mask] is the same physical cell as
+    // entries_[(pos - Capacity) & mask]. If a worker hasn't claimed that
+    // older entry yet, writing here would silently overwrite it (data
+    // loss) -- so wait until read_index_ has caught up enough to free it.
+    while (pos - read_index_.load(std::memory_order_acquire) >= Capacity) {
+      // busy-spin
+    }
     entries_[pos & (Capacity - 1)] = pool_slot_index;
-    // release: ensures the write to entries_[] above is visible 
+    // release: ensures the write to entries_[] above is visible
     // to any worker thread that observes the new write_index_.
     write_index_.store(pos + 1, std::memory_order_release);
 

@@ -15,10 +15,12 @@ def build_packet():
   return header + payload
 
 def main():
+  num_packets = 2000
   with socket.create_connection((HOST, PORT)) as sock:
-    packet = build_packet()
-    sock.sendall(packet)
-    print(f"Sent packet: {len(packet)} bytes")
+    for _ in range(num_packets):
+      packet = build_packet()
+      sock.sendall(packet)
+    print(f"Sent {num_packets} packets")
 
 
 if __name__ == "__main__":

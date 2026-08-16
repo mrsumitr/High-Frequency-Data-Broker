@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cstdio>
 #include <unistd.h>
 #include "memory_pool.hpp"
@@ -26,22 +27,32 @@ int main() {
     WorkerPool<RING_CAPACITY> workers(hw_threads, pool, ring);
 
     TcpListener listener(9000);
-    int client_fd = listener.accept_connectivity();
+    uint64_t next_slot = 0;
 
-    if (receive_sensor_reading(client_fd, pool, 0)) {
-        pool.state(0).store(SlotState::Ready, std::memory_order_release);
-        ring.publish(0);
-        std::printf("Published slot 0 to the ring buffer.\n");
-    } else {
-        std::printf("Failed to receive a valid sensor packet.\n");
+    while (true) {  // outer loop: accept a new connection if one drops
+        int client_fd = listener.accept_connectivity();
+
+        while (true) {  // inner loop: read packets continuously from this connection
+            std::size_t slot_index = next_slot % POOL_CAPACITY;
+
+            // Backpressure: don't overwrite a slot a worker hasn't
+            // finished with yet.
+            while (pool.state(slot_index).load(std::memory_order_acquire) != SlotState::Free) {
+                // busy-spin
+            }
+
+            if (!receive_sensor_reading(client_fd, pool, slot_index)) {
+                break;  // connection closed or malformed packet
+            }
+
+            pool.state(slot_index).store(SlotState::Ready, std::memory_order_release);
+            ring.publish(slot_index);
+            ++next_slot;
+        }
+
+        close(client_fd);
+        std::printf("Connection closed. Waiting for a new one...\n");
     }
-
-    close(client_fd);
-
-    // Give a worker a moment to claim and process before shutdown.
-    // (A real system loops forever ingesting instead of sleeping here --
-    // that's the next step.)
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     return 0;
     // workers' destructor runs here, stops the spin loops, and joins all threads
