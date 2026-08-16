@@ -12,6 +12,7 @@
 #include "ring_buffer.hpp"
 #include "latency_stats.hpp"
 #include "clock_utils.hpp"
+#include "backoff.hpp"
 #include <thread>
 
 // Ring capacity isn't exposed as a CLI flag: it's a template parameter
@@ -24,6 +25,7 @@ struct Config {
     std::size_t pool_capacity = 10000;
     unsigned int worker_count = 0;  // 0 => auto-detect from hardware_concurrency()
     std::size_t ma_window = 3;
+    std::size_t log_every = 1;  // 0 = never log a claim, N = log every Nth packet per worker
 };
 
 void print_usage(const char* prog_name) {
@@ -33,6 +35,7 @@ void print_usage(const char* prog_name) {
         "  --pool-size N  number of pre-allocated memory pool slots (default 10000)\n"
         "  --workers N    number of worker threads (default: hardware core count)\n"
         "  --window N     moving average window size (default 3)\n"
+        "  --log-every N  log every Nth processed packet per worker; 0 = silent (default 1)\n"
         "  --help         show this message\n",
         prog_name);
 }
@@ -58,6 +61,8 @@ Config parse_args(int argc, char** argv) {
             cfg.worker_count = static_cast<unsigned int>(std::stoul(next_value()));
         } else if (arg == "--window") {
             cfg.ma_window = static_cast<std::size_t>(std::stoul(next_value()));
+        } else if (arg == "--log-every") {
+            cfg.log_every = static_cast<std::size_t>(std::stoul(next_value()));
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -89,7 +94,9 @@ int main(int argc, char** argv) {
     std::printf("Memory pool ready: %zu slots (%.2f MB)\n", pool.capacity(), pool_mb);
 
     RingBuffer<RING_CAPACITY> ring;
-    LatencyStats stats;
+    // Sample ring sized to the memory pool -- keeps roughly one pool's
+    // worth of recent latency history for percentile calculation.
+    LatencyStats stats(cfg.pool_capacity);
 
     // Deliberately no SA_RESTART: a blocking accept()/recv() interrupted
     // by SIGINT/SIGTERM must return EINTR immediately so the loops below
@@ -110,7 +117,7 @@ int main(int argc, char** argv) {
     std::printf("Spawning %u worker threads (moving average window: %zu).\n", hw_threads,
                 cfg.ma_window);
     {
-        WorkerPool<RING_CAPACITY> workers(hw_threads, pool, ring, stats, cfg.ma_window);
+        WorkerPool<RING_CAPACITY> workers(hw_threads, pool, ring, stats, cfg.ma_window, cfg.log_every);
 
         TcpListener listener(cfg.port);
         uint64_t next_slot = 0;
@@ -126,8 +133,10 @@ int main(int argc, char** argv) {
 
                 // Backpressure: don't overwrite a slot a worker hasn't
                 // finished with yet.
+                SpinBackoff pool_backoff;
                 while (pool.state(slot_index).load(std::memory_order_acquire) != SlotState::Free) {
                     if (g_shutdown_requested) break;
+                    pool_backoff.spin();
                 }
                 if (g_shutdown_requested) break;
 
@@ -164,6 +173,9 @@ int main(int argc, char** argv) {
     std::printf("Processed %llu packets in %.3f seconds\n",
                 static_cast<unsigned long long>(stats.count()), elapsed_s);
     std::printf("Average latency: %.2f us\n", stats.average_us());
+    std::printf("p50 latency:     %.2f us\n", stats.percentile_us(0.50));
+    std::printf("p95 latency:     %.2f us\n", stats.percentile_us(0.95));
+    std::printf("p99 latency:     %.2f us\n", stats.percentile_us(0.99));
     std::printf("Peak latency:    %.2f us\n", static_cast<double>(stats.max_ns()) / 1000.0);
     std::printf("Memory pool:     %.2f MB (static, allocated once at startup)\n", pool_mb);
     std::printf("Peak RSS:        %.2f MB\n", peak_rss_mb);

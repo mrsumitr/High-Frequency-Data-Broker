@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include "backoff.hpp"
 
 //fixed-capacity circular buffer of pool slot indices. The listener
 //thread publishes a slot index by writing it into the ring and 
@@ -23,8 +24,9 @@ class RingBuffer{
     // entries_[(pos - Capacity) & mask]. If a worker hasn't claimed that
     // older entry yet, writing here would silently overwrite it (data
     // loss) -- so wait until read_index_ has caught up enough to free it.
+    SpinBackoff backoff;
     while (pos - read_index_.load(std::memory_order_acquire) >= Capacity) {
-      // busy-spin
+      backoff.spin();
     }
     entries_[pos & (Capacity - 1)] = pool_slot_index;
     // release: ensures the write to entries_[] above is visible
