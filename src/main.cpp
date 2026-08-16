@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <unistd.h>
 #include <csignal>
 #include <sys/resource.h>
@@ -12,8 +14,60 @@
 #include "clock_utils.hpp"
 #include <thread>
 
-constexpr std::size_t POOL_CAPACITY = 10000;
+// Ring capacity isn't exposed as a CLI flag: it's a template parameter
+// (needed at compile time for the power-of-two bitmask trick), unlike
+// the other knobs below which are plain runtime values.
 constexpr std::size_t RING_CAPACITY = 1024;
+
+struct Config {
+    uint16_t port = 9000;
+    std::size_t pool_capacity = 10000;
+    unsigned int worker_count = 0;  // 0 => auto-detect from hardware_concurrency()
+    std::size_t ma_window = 3;
+};
+
+void print_usage(const char* prog_name) {
+    std::printf(
+        "Usage: %s [options]\n"
+        "  --port N       TCP port to listen on (default 9000)\n"
+        "  --pool-size N  number of pre-allocated memory pool slots (default 10000)\n"
+        "  --workers N    number of worker threads (default: hardware core count)\n"
+        "  --window N     moving average window size (default 3)\n"
+        "  --help         show this message\n",
+        prog_name);
+}
+
+Config parse_args(int argc, char** argv) {
+    Config cfg;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        auto next_value = [&]() -> std::string {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for %s\n", arg.c_str());
+                std::exit(1);
+            }
+            return argv[++i];
+        };
+
+        if (arg == "--port") {
+            cfg.port = static_cast<uint16_t>(std::stoi(next_value()));
+        } else if (arg == "--pool-size") {
+            cfg.pool_capacity = static_cast<std::size_t>(std::stoul(next_value()));
+        } else if (arg == "--workers") {
+            cfg.worker_count = static_cast<unsigned int>(std::stoul(next_value()));
+        } else if (arg == "--window") {
+            cfg.ma_window = static_cast<std::size_t>(std::stoul(next_value()));
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            std::exit(0);
+        } else {
+            std::fprintf(stderr, "Unknown argument: %s (use --help)\n", arg.c_str());
+            std::exit(1);
+        }
+    }
+    return cfg;
+}
 
 // Set by the signal handler only, read everywhere else. sig_atomic_t is
 // the one type the standard guarantees is safe to touch from a signal
@@ -24,11 +78,13 @@ void handle_shutdown_signal(int) {
     g_shutdown_requested = 1;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    Config cfg = parse_args(argc, argv);
+
     std::printf("High-Frequency Data Broker starting up...\n");
 
     // the only and only allocation for whole program's life time.
-    MemoryPool pool(POOL_CAPACITY);
+    MemoryPool pool(cfg.pool_capacity);
     const double pool_mb=(pool.capacity()*sizeof(SensorReading))/(1024.0*1024.0);
     std::printf("Memory pool ready: %zu slots (%.2f MB)\n", pool.capacity(), pool_mb);
 
@@ -48,13 +104,15 @@ int main() {
 
     uint64_t program_start_ns = now_ns();
 
-    unsigned int hw_threads = std::thread::hardware_concurrency();
-    if(hw_threads==0) hw_threads = 4;
-    std::printf("Spawning %u worker threads.\n", hw_threads);
+    unsigned int hw_threads = cfg.worker_count;
+    if (hw_threads == 0) hw_threads = std::thread::hardware_concurrency();
+    if (hw_threads == 0) hw_threads = 4;
+    std::printf("Spawning %u worker threads (moving average window: %zu).\n", hw_threads,
+                cfg.ma_window);
     {
-        WorkerPool<RING_CAPACITY> workers(hw_threads, pool, ring, stats);
+        WorkerPool<RING_CAPACITY> workers(hw_threads, pool, ring, stats, cfg.ma_window);
 
-        TcpListener listener(9000);
+        TcpListener listener(cfg.port);
         uint64_t next_slot = 0;
 
         while (!g_shutdown_requested) {  // outer loop: accept a new connection if one drops
@@ -64,7 +122,7 @@ int main() {
             }
 
             while (!g_shutdown_requested) {  // inner loop: read packets continuously from this connection
-                std::size_t slot_index = next_slot % POOL_CAPACITY;
+                std::size_t slot_index = next_slot % cfg.pool_capacity;
 
                 // Backpressure: don't overwrite a slot a worker hasn't
                 // finished with yet.

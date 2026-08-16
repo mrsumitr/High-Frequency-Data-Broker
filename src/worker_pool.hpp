@@ -11,8 +11,6 @@
 #include "memory_pool.hpp"
 #include "ring_buffer.hpp"
 
-constexpr std::size_t MOVING_AVERAGE_WINDOW = 3;
-
 // A fixed set of worker threads created once at startup and kept alive
 // for the whole program. Each thread busy-spins on the ring buffer,
 // claiming and processing pool slots as the listener publishes them.
@@ -20,8 +18,8 @@ template <std::size_t RingCapacity>
 class WorkerPool {
 public:
     WorkerPool(std::size_t num_threads, MemoryPool& pool, RingBuffer<RingCapacity>& ring,
-               LatencyStats& stats)
-        : running_(true), pool_(pool), ring_(ring), stats_(stats) {
+               LatencyStats& stats, std::size_t ma_window)
+        : running_(true), pool_(pool), ring_(ring), stats_(stats), ma_window_(ma_window) {
         threads_.reserve(num_threads);
         for (std::size_t i = 0; i < num_threads; ++i) {
             threads_.emplace_back([this, i] { this->worker_loop(i); });
@@ -50,7 +48,7 @@ private:
                 // worker has its own local buffer, so no data race even
                 // though many workers process concurrently.
                 float smoothed[MAX_VOLTAGE_SAMPLES];
-                moving_average(r.voltages, smoothed, r.num_samples, MOVING_AVERAGE_WINDOW);
+                moving_average(r.voltages, smoothed, r.num_samples, ma_window_);
 
                 // Latency window: from the moment this packet crossed the
                 // socket (r.recv_ns, stamped in packet_reader.hpp) to the
@@ -90,4 +88,5 @@ private:
     MemoryPool& pool_;
     RingBuffer<RingCapacity>& ring_;
     LatencyStats& stats_;
+    std::size_t ma_window_;
 };

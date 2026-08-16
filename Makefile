@@ -16,4 +16,4 @@ clean:
 	rm -f $(BIN)
 
 run: all
-	./$(BIN)
+	./$(BIN) $(ARGS)

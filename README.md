@@ -47,6 +47,23 @@ python3 tools/sensor_sim.py    # streams 2000 binary packets over one connection
 
 Stop the broker with `Ctrl+C` to see the final performance report.
 
+### Configuration
+
+Everything is a runtime flag, no rebuilding needed to change defaults:
+
+```
+./broker --port 9000 --pool-size 10000 --workers 8 --window 3
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--port` | 9000 | TCP port to listen on |
+| `--pool-size` | 10000 | number of pre-allocated memory pool slots |
+| `--workers` | hardware core count | number of worker threads |
+| `--window` | 3 | moving average window size |
+
+`--help` prints usage and exits. Via `make`, pass flags with `make run ARGS="--port 9500 --workers 2"`.
+
 ## Measured results
 
 From actual test runs on Apple Silicon (M-series, 8 logical cores):
@@ -70,6 +87,6 @@ Two real concurrency bugs surfaced only under load-testing (2000 packets), not a
 ## What's not implemented
 
 - Single active client connection at a time (though the broker re-accepts after a disconnect).
-- Fixed configuration (port, pool size, worker count) via compile-time constants, not CLI flags.
 - No automated test suite.
 - No tail-latency percentiles (p50/p95/p99) — only average and max are tracked.
+- Busy-spin loops (idle workers, ring buffer backpressure) pin CPU cores at 100% with no backoff.
