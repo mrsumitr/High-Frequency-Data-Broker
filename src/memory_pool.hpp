@@ -9,7 +9,9 @@
 constexpr std::size_t MAX_VOLTAGE_SAMPLES = 32;
 
 struct SensorReading {
-    uint64_t timestamp_ns;
+    uint64_t timestamp_ns;  // hardware's own timestamp, from the wire packet
+    uint64_t recv_ns;       // broker-local monotonic clock, stamped the moment
+                             // this packet started being read off the socket
     uint32_t num_samples;
     float voltages[MAX_VOLTAGE_SAMPLES];
 };

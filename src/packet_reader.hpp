@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "clock_utils.hpp"
 #include "memory_pool.hpp"
 
 // Wire format is big-endian (network byte order), matching Python's
@@ -50,6 +51,11 @@ inline bool read_exact(int fd, uint8_t* buf, std::size_t len) {
 // slot. Wire layout: 8-byte timestamp_ns, 4-byte num_samples, then
 // num_samples x 4-byte floats, all big-endian.
 inline bool receive_sensor_reading(int fd, MemoryPool& pool, std::size_t slot_index) {
+    // Stamped as early as possible -- this is our "crossed the network
+    // socket" instant, the start of the latency window the final report
+    // measures against.
+    uint64_t recv_start_ns = now_ns();
+
     uint8_t header[12];
     if (!read_exact(fd, header, sizeof(header))) return false;
 
@@ -75,6 +81,7 @@ inline bool receive_sensor_reading(int fd, MemoryPool& pool, std::size_t slot_in
     }
 
     reading.timestamp_ns = timestamp_ns;
+    reading.recv_ns = recv_start_ns;
     reading.num_samples = num_samples;
     return true;
 }

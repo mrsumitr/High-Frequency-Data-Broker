@@ -5,7 +5,9 @@
 #include <thread>
 #include <vector>
 
+#include "clock_utils.hpp"
 #include "dsp.hpp"
+#include "latency_stats.hpp"
 #include "memory_pool.hpp"
 #include "ring_buffer.hpp"
 
@@ -17,8 +19,9 @@ constexpr std::size_t MOVING_AVERAGE_WINDOW = 3;
 template <std::size_t RingCapacity>
 class WorkerPool {
 public:
-    WorkerPool(std::size_t num_threads, MemoryPool& pool, RingBuffer<RingCapacity>& ring)
-        : running_(true), pool_(pool), ring_(ring) {
+    WorkerPool(std::size_t num_threads, MemoryPool& pool, RingBuffer<RingCapacity>& ring,
+               LatencyStats& stats)
+        : running_(true), pool_(pool), ring_(ring), stats_(stats) {
         threads_.reserve(num_threads);
         for (std::size_t i = 0; i < num_threads; ++i) {
             threads_.emplace_back([this, i] { this->worker_loop(i); });
@@ -49,6 +52,14 @@ private:
                 float smoothed[MAX_VOLTAGE_SAMPLES];
                 moving_average(r.voltages, smoothed, r.num_samples, MOVING_AVERAGE_WINDOW);
 
+                // Latency window: from the moment this packet crossed the
+                // socket (r.recv_ns, stamped in packet_reader.hpp) to the
+                // moment the math above finished. Deliberately measured
+                // before the logging below -- printf is I/O, not part of
+                // the pipeline's actual processing latency.
+                uint64_t latency_ns = now_ns() - r.recv_ns;
+                stats_.record(latency_ns);
+
                 // Build the whole log line in a thread-local buffer and
                 // emit it with a single printf() call. printf() calls are
                 // individually atomic w.r.t. other threads, but a "line"
@@ -57,9 +68,9 @@ private:
                 // threads sharing stdout is itself shared mutable state.
                 char line[256];
                 int off = std::snprintf(line, sizeof(line),
-                    "Worker %zu claimed slot %zu (timestamp=%llu, num_samples=%u) smoothed=[",
+                    "Worker %zu claimed slot %zu (timestamp=%llu, num_samples=%u, latency=%.1fus) smoothed=[",
                     worker_id, slot_index, static_cast<unsigned long long>(r.timestamp_ns),
-                    r.num_samples);
+                    r.num_samples, latency_ns / 1000.0);
                 for (uint32_t i = 0; i < r.num_samples && off < static_cast<int>(sizeof(line)); ++i) {
                     off += std::snprintf(line + off, sizeof(line) - off, "%.3f%s", smoothed[i],
                                           i + 1 < r.num_samples ? ", " : "");
@@ -78,4 +89,5 @@ private:
     std::vector<std::thread> threads_;
     MemoryPool& pool_;
     RingBuffer<RingCapacity>& ring_;
+    LatencyStats& stats_;
 };

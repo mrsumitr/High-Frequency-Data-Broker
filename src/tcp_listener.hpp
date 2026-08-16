@@ -1,6 +1,7 @@
 #pragma once
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <netinet/in.h>
@@ -45,13 +46,19 @@ public:
   TcpListener(const TcpListener&) =delete;
   TcpListener& operator = (const TcpListener&) = delete;
 
-  //Block until a client connects. Returns the connected socket fd.
+  //Block until a client connects. Returns the connected socket fd, or
+  //-1 if the blocking accept() was interrupted by a signal (e.g. the
+  //Ctrl+C shutdown handler) -- the caller should check the shutdown
+  //flag rather than treating -1 as a fatal error.
   int accept_connectivity(){
     sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
     int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
 
     if(client_fd < 0){
+      if (errno == EINTR) {
+        return -1;
+      }
       std::perror("accept");
       std::exit(1);
     }
